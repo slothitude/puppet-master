@@ -1,0 +1,30 @@
+puppets:
+  lappy-4b:
+    name: "Lappy qwen3.5:4b"
+    ollama_url: "http://192.168.0.33:11434"
+    model: "qwen3.5:4b"
+    max_concurrent: 2
+    think: false
+    default_budget:
+      max_turns: 20
+      max_tokens: 50000
+
+  lappy-8b:
+    name: "Lappy qwen3.5:8b"
+    ollama_url: "http://192.168.0.33:11434"
+    model: "qwen3.5:8b"
+    max_concurrent: 1
+    think: false
+    default_budget:
+      max_turns: 30
+      max_tokens: 80000
+
+  pi-4b:
+    name: "Pi qwen3.5:4b"
+    ollama_url: "http://192.168.0.237:11434"
+    model: "qwen3.5:4b"
+    max_concurrent: 1
+    think: false
+    default_budget:
+      max_turns: 15
+      max_tokens: 30000
