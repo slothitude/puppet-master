@@ -4,17 +4,35 @@ Code delegation with scope integrity. A large model (Claude Code, GLM-5.1) decom
 
 The mandate server is the authority — not the prompt. Agents don't guess what they can do. They ask the graph.
 
-## The Problem
+## Quick Start
 
-When you delegate code work to a small model, three things go wrong:
+```bash
+# 1. Install dependencies
+pip install fastmcp httpx pyyaml
 
-1. **Scope creep** — the model drifts outside its assigned files
-2. **Goal drift** — the model loses track of what it was supposed to do
-3. **State bleed** — changes leak between parallel workers, or sub-agents spawn unbounded trees
+# 2. Make sure Ollama is running with a model pulled
+ollama pull qwen3.5:4b
 
-Puppet Master fixes this with structural enforcement, not prompting. A mandate is a contract. A scope enforcer is a gatekeeper. A git worktree is a sandbox. These exist in a queryable graph database — the same pattern that solved Godot API hallucination in GAT, applied to agent authority.
+# 3. Run tests to verify
+python -m pytest tests/ -v   # 102 tests should pass
 
-## Architecture
+# 4. Start the MCP server (for use with Claude Code)
+python server.py
+```
+
+Add to your `.mcp.json`:
+```json
+{
+  "mcpServers": {
+    "puppet-master": {
+      "command": "python",
+      "args": ["C:/path/to/puppet-master/server.py"]
+    }
+  }
+}
+```
+
+## How It Works
 
 ```
 ROOT AGENT (Claude Code / GLM-5.1 / standalone)
@@ -41,118 +59,136 @@ VALIDATOR (mechanical checks before merge)
      No new deps? No side effects?
 ```
 
-## GAT Lineage
+## Usage
 
-GAT solved agents hallucinating Godot APIs by putting 22,095 nodes and 54,966 edges in a queryable SQLite graph. Agents stopped guessing and started asking.
+### With Claude Code (MCP Server)
 
-Puppet Master uses the same architecture for agent authority:
+This is the intended use case. Claude Code acts as the root agent and calls Puppet Master's MCP tools to delegate work.
 
-| GAT | Puppet Master |
-|-----|---------------|
-| `gat.db` — engine schema graph | `mandate_graph.db` — delegation tree |
-| `get_class()` — agent asks what a node IS | `mandate/query` — agent asks what its mandate IS |
-| `find_inheritance()` — trace class hierarchy | `mandate/ancestry` — trace delegation chain to root |
-| `validate_node_path()` — validate connections | `scope/check` — validate file access before action |
-| Domain-scoped tools | Mandate-scoped tool surfaces |
-| `engine_schema.json` | `mandate_schema` — queryable authority graph |
-
-The principle is identical: if agents can query a database for their authority, they don't hallucinate it.
-
-## Files
-
+**1. Delegate a task to an executor:**
 ```
-puppet-master/
-  mandate.py           # Core dataclasses: CodeMandate, Budget, ScopeViolation, ValidationReport
-  graph.py             # MandateGraph — SQLite WAL nodes+edges, ancestry, FTS, subtree
-  scope_enforcer.py    # Runtime scope enforcement — wraps tool calls, records violations
-  sandbox.py           # Git worktree isolation — create, diff, merge, cleanup
-  validator.py         # Mechanical validation — scope, tests, schema, deps, side effects
-  executor.py          # ReAct loop — Ollama API, scoped tools, budget enforcement
-  server.py            # FastMCP server — 12 tools (delegation, execution, validation, merge)
-  config.py            # Puppet loading from YAML, DB path defaults
-  standalone.py         # Autonomous entry point — own agent loop, no Claude Code needed
-  puppets.yaml         # Executor registry (Lappy 4b/8b, Pi 4b)
-  data/
-    mandate_graph.db   # Auto-created, persists delegation tree across sessions
-  tests/
-    test_mandate.py    # Path globs, budget FSM, status transitions, schema validation
-    test_scope.py      # Allowed/blocked tool calls, violation recording to graph
-    test_graph.py       # Node/edge ops, ancestry traversal, subtree BFS, FTS search
-    test_sandbox.py     # Worktree creation, file isolation, diff, merge, cleanup
-    test_validator.py   # Scope checks, schema validation, side effects, overlap detection
-    test_e2e.py         # Full delegation cycle, violation E2E, overlap detection
+delegate(
+  goal="Fix auth bug in login.py — add credential check",
+  repo_path="./my-project",
+  executor="lappy-4b",
+  allowed_paths=["src/auth/**"],
+  forbidden_paths=["src/utils/**"]
+)
+```
+Returns a `mandate_id`, branch name, worktree path, and checkpoint SHA. The executor runs on an isolated git branch.
+
+**2. Check on all mandates:**
+```
+mandate_list()
+```
+Returns every mandate with its status, goal, executor, branch, and children. The `stats` field includes graph-wide node/edge counts.
+
+**3. Read a specific mandate's contract:**
+```
+mandate_query(mandate_id="mnd-a1b2c3d4")
+```
+Returns the full contract: allowed paths, forbidden paths, budget remaining, status, executor assignment.
+
+**4. Trace delegation ancestry:**
+```
+mandate_ancestry(mandate_id="mnd-a1b2c3d4")
+```
+Returns the full chain from this mandate back to root. Useful for understanding why a mandate exists.
+
+**5. Check if an action is allowed before executing:**
+```
+scope_check(mandate_id="mnd-a1b2c3d4", tool_name="write_file", path="src/auth/login.py")
+```
+Returns `{allowed: true}` or `{allowed: false, reason: "path_outside_scope"}`. Use this to preview whether the enforcer would block something.
+
+**6. Validate a completed mandate:**
+```
+mandate_validate(mandate_id="mnd-a1b2c3d4")
+```
+Runs the full validation pipeline: scope check, test results, schema compliance, dependency check, side-effect detection. Returns a `ValidationReport` with `accepted: true/false` and per-check details.
+
+**7. Merge an accepted mandate:**
+```
+mandate_merge(mandate_id="mnd-a1b2c3d4", repo_path="./my-project", target_branch="main")
+```
+Fast-forwards the mandate's branch into the target. Cleans up the worktree on success.
+
+**8. Reject and re-delegate (if validation fails):**
+```
+mandate_reject(mandate_id="mnd-a1b2c3d4", reason="Scope violation — touched forbidden path", re_delegate=True)
+```
+Records the rejection reason, optionally creates a new tighter mandate with `depth - 1`.
+
+**9. Search past mandates:**
+```
+mandate_search(query="auth bug")
+```
+Full-text search across all mandate goals, results, and rejection reasons.
+
+**10. Check overall health:**
+```
+status()
+```
+Returns graph stats and puppet health (whether Ollama is reachable on each machine).
+
+### Standalone (No Claude Code)
+
+```bash
+python standalone.py "fix auth bugs" --repo ./my-project --executor lappy-4b
+python standalone.py "refactor API layer" --repo ./my-project --executor lappy-8b --plan-only
 ```
 
-## Token and Request Tracking
+Standalone mode does heuristic partitioning (one mandate per code directory) instead of LLM-driven analysis. Use `--plan-only` to see what mandates would be created without executing them.
 
-Every executor tracks token consumption via its `Budget`:
+### From Python
 
 ```python
-@dataclass
-class Budget:
-    max_turns: int = 20       # max LLM calls per mandate
-    max_tokens: int = 50000    # max tokens per mandate
-    turns_used: int = 0        # incremented each ReAct turn
-    tokens_used: int = 0        # accumulated from Ollama responses
+from config import load_puppets, get_puppet
+from graph import MandateGraph
+from mandate import Budget, CodeMandate
+from sandbox import Sandbox
+from executor import Executor
+
+# Load a puppet
+puppet = get_puppet("lappy-4b")
+
+# Create a mandate
+mandate = CodeMandate(
+    goal="Fix auth bug",
+    allowed_paths=["src/auth/**"],
+    forbidden_paths=["src/utils/**"],
+    budget=Budget(max_turns=20, max_tokens=50000),
+    depth=1,
+)
+
+# Create isolated worktree
+sb = Sandbox("./my-project")
+branch = f"fix-{mandate.mandate_id[:8]}"
+checkpoint = sb.get_checkpoint()
+worktree_path = sb.create_worktree(branch, checkpoint)
+mandate.branch = branch
+mandate.checkpoint = checkpoint
+
+# Run the executor
+executor = Executor(mandate, puppet, worktree_path)
+result = executor.run()
+
+# Inspect result
+print(result["summary"])
+print(result["files_changed"])
+
+# Merge if happy
+sb.merge_branch(branch, "main")
+sb.cleanup(branch)
 ```
 
-Budget is stored in the mandate graph and queried at runtime. When an executor calls the Ollama chat API, the response's `eval_count` and `prompt_eval_count` are parsed and recorded. If the budget is exhausted, the enforcer blocks the next tool call with a `budget_exhausted` violation.
-
-### Per-Puppet Budgets (puppets.yaml)
-
-| Puppet | Model | Max Turns | Max Tokens | Machine |
-|--------|-------|-----------|------------|---------|
-| `lappy-4b` | qwen3.5:4b | 20 | 50,000 | Lappy (192.168.0.33) |
-| `lappy-8b` | qwen3.5:8b | 30 | 80,000 | Lappy (192.168.0.33) |
-| `pi-4b` | qwen3.5:4b | 15 | 30,000 | Pi (192.168.0.237) |
-
-### Request Counting
-
-Each mandate tracks its full lifecycle in the graph:
-
-```
-mandate_nodes:   mandate (contract), executor (puppet), branch (worktree), result (output), violation (audit trail)
-mandate_edges:  delegates_to, depends_on, validates, merges_into, rejected_by
-```
-
-The graph persists everything: who delegated what, to which executor, how many turns it took, what violations occurred, whether it was accepted or rejected. Run `mandate_list()` to see the full state.
-
-## Delegation Flow
-
-```
-1. ROOT receives goal: "fix auth bugs in src/auth/"
-2. ROOT calls delegate(goal, repo_path, executor="lappy-4b")
-   -> Sandbox creates git worktree at checkpoint SHA
-   -> Mandate created with allowed_paths=["src/auth/**"]
-   -> Written to graph as mandate + branch nodes
-3. EXECUTOR runs ReAct loop on isolated branch
-   -> ScopeEnforcer blocks any tool call outside allowed paths
-   -> Violations recorded to graph as violation nodes
-   -> Budget enforced: 20 turns max, 50k tokens max
-   -> Executor calls submit_result when done
-4. ROOT calls mandate_validate(mandate_id)
-   -> Mechanical checks: scope, tests, schema, deps, side effects
-   -> If all pass: large-model quality gate (future)
-5a. ACCEPT -> mandate_merge() -> fast-forward merge to main
-5b. REJECT -> mandate_reject(reason, re_delegate=True) -> tighter mandate
-```
-
-## Mandate Status Machine
-
-```
-pending -> dispatched -> submitted -> accepted (terminal)
-                                -> rejected -> pending (re-delegation)
-```
-
-Invalid transitions are rejected at runtime — you can't go from `pending` to `accepted` without going through dispatch and submit first.
-
-## MCP Tools (12)
+## MCP Tools Reference (14)
 
 ### Delegation
 | Tool | Description |
 |------|-------------|
-| `delegate` | High-level: create mandate + worktree + dispatch in one call |
-| `mandate_create` | Create a mandate node manually (for multi-mandate setups) |
+| `delegate` | Create mandate + worktree + dispatch in one call |
+| `mandate_create` | Create a mandate manually (for multi-mandate setups) |
 | `mandate_query` | Read a mandate's full contract |
 | `mandate_list` | All mandates with status + tree structure |
 | `mandate_ancestry` | Full delegation chain from mandate to root |
@@ -173,84 +209,149 @@ Invalid transitions are rejected at runtime — you can't go from `pending` to `
 | `mandate_reject` | Reject, record reason, optionally re-delegate |
 | `mandate_search` | FTS search across past mandates |
 
-## Setup
+### Executor Tools (available to the small model inside the ReAct loop)
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read a file from the worktree |
+| `write_file` | Write content to a file in the worktree |
+| `list_files` | List files in a directory |
+| `search_files` | Search for a pattern in files |
+| `run_tests` | Run the test suite |
+| `think` | Think out loud — structured reasoning scratchpad |
+| `submit_result` | Submit work as the final result |
 
-### Prerequisites
+## Mandate Lifecycle
+
+```
+1. ROOT receives goal: "fix auth bugs in src/auth/"
+2. ROOT calls delegate(goal, repo_path, executor="lappy-4b")
+   -> Sandbox creates git worktree at checkpoint SHA
+   -> Mandate created with allowed_paths=["src/auth/**"]
+   -> Written to graph as mandate + branch nodes
+3. EXECUTOR runs ReAct loop on isolated branch
+   -> ScopeEnforcer blocks any tool call outside allowed paths
+   -> Violations recorded to graph as violation nodes
+   -> Budget enforced: 20 turns max, 50k tokens max
+   -> Executor calls submit_result when done
+4. ROOT calls mandate_validate(mandate_id)
+   -> Mechanical checks: scope, tests, schema, deps, side effects
+5a. ACCEPT -> mandate_merge() -> fast-forward merge to main
+5b. REJECT -> mandate_reject(reason, re_delegate=True) -> tighter mandate
+```
+
+### Status Machine
+
+```
+pending -> dispatched -> submitted -> accepted (terminal)
+                                -> rejected -> pending (re-delegation)
+```
+
+Invalid transitions are rejected at runtime. You can't go from `pending` to `accepted` without dispatch and submit.
+
+## Configuration
+
+### puppets.yaml
+
+```yaml
+puppets:
+  lappy-4b:
+    name: "Lappy qwen3.5:4b"
+    ollama_url: "http://192.168.0.33:11434"
+    model: "qwen3.5:4b"
+    max_concurrent: 2
+    think: false
+    default_budget:
+      max_turns: 20
+      max_tokens: 50000
+
+  lappy-8b:
+    name: "Lappy qwen3.5:8b"
+    ollama_url: "http://192.168.0.33:11434"
+    model: "qwen3.5:8b"
+    max_concurrent: 1
+    think: false
+    default_budget:
+      max_turns: 30
+      max_tokens: 80000
+
+  pi-4b:
+    name: "Pi qwen3.5:4b"
+    ollama_url: "http://192.168.0.237:11434"
+    model: "qwen3.5:4b"
+    max_concurrent: 1
+    think: false
+    default_budget:
+      max_turns: 15
+      max_tokens: 30000
+```
+
+| Puppet | Model | Max Turns | Max Tokens | Machine |
+|--------|-------|-----------|------------|---------|
+| `lappy-4b` | qwen3.5:4b | 20 | 50,000 | Lappy (192.168.0.33) |
+| `lappy-8b` | qwen3.5:8b | 30 | 80,000 | Lappy (192.168.0.33) |
+| `pi-4b` | qwen3.5:4b | 15 | 30,000 | Pi (192.168.0.237) |
+
+### Mandate Budget Tracking
+
+Every mandate tracks token consumption via its `Budget`:
+- `turns_used` — incremented each ReAct turn
+- `tokens_used` — accumulated from Ollama `eval_count` + `prompt_eval_count`
+
+Budget is stored in the mandate graph and queryable via `mandate_list()`. When budget is exhausted, the enforcer blocks further tool calls with a `budget_exhausted` violation.
+
+### Adding a New Executor
+
+Add an entry to `puppets.yaml`:
+```yaml
+puppets:
+  my-machine:
+    ollama_url: "http://my-ip:11434"
+    model: "qwen3.5:4b"
+    max_concurrent: 1
+    default_budget:
+      max_turns: 25
+      max_tokens: 60000
+```
+
+Then use it: `delegate(goal="...", repo_path="./", executor="my-machine")`
+
+## Overlap Partitioning
+
+When creating multiple mandates that touch overlapping paths, the partitioner classifies and resolves conflicts:
+
+| Type | Meaning | Resolution |
+|------|---------|------------|
+| `ABSORB` | One path is a subset of another | Merge into the larger mandate |
+| `EXTRACT` | Shared utility touched by both | Create a third mandate for the shared code |
+| `SEQUENCE` | Incidental collision | Serialize with `depends_on` edges |
+
+This runs automatically when you create overlapping mandates. No manual intervention needed.
+
+## Project Structure
+
+```
+puppet-master/
+  server.py            # FastMCP server — 14 tools for delegation, validation, merge
+  mandate.py           # CodeMandate, Budget, ScopeViolation, ValidationReport
+  graph.py             # MandateGraph — SQLite WAL nodes+edges, ancestry, FTS, subtree
+  scope_enforcer.py    # Runtime scope enforcement — wraps tool calls, records violations
+  sandbox.py           # Git worktree isolation — create, diff, merge, cleanup
+  validator.py         # Mechanical validation — scope, tests, schema, deps, side effects
+  executor.py          # ReAct loop — Ollama API, scoped tools, budget enforcement
+  partitioner.py       # Overlap classification (ABSORB/EXTRACT/SEQUENCE) + resolution
+  config.py            # Puppet loading from YAML, DB path defaults
+  standalone.py         # Autonomous entry point — own agent loop, no Claude Code needed
+  puppets.yaml         # Executor registry (Lappy 4b/8b, Pi 4b)
+  data/
+    mandate_graph.db   # Auto-created, persists delegation tree across sessions
+  tests/               # 102 tests
+```
+
+## Prerequisites
+
 - Python 3.13+
 - FastMCP (`pip install fastmcp`)
 - httpx (`pip install httpx`)
 - PyYAML (`pip install pyyaml`)
-- Ollama running on Lappy (192.168.0.33:11434) and/or Pi (192.168.0.237:11434)
-- Models installed: `qwen3.5:4b`, `qwen3.5:8b`
-
-### Install
-
-```bash
-pip install fastmcp httpx pyyaml
-git clone <this repo>
-cd puppet-master
-python -m pytest tests/ -v   # 74 tests should pass
-```
-
-### Run as MCP Server (with Claude Code)
-
-```bash
-python server.py
-```
-
-Add to `.mcp.json`:
-```json
-{
-  "mcpServers": {
-    "puppet-master": {
-      "command": "python",
-      "args": ["C:/path/to/puppet-master/server.py"]
-    }
-  }
-}
-```
-
-### Run Standalone
-
-```bash
-python standalone.py "fix auth bugs" --repo ./my-project --executor lappy-4b
-python standalone.py "refactor API layer" --repo ./my-project --executor lappy-8b --plan-only
-```
-
-## Token/Request Accounting
-
-Token and request tracking is per-mandate, stored in the graph, and queryable:
-
-```
-mandate_list() -> each mandate includes budget.turns_used and budget.tokens_used
-graph_stats() -> total nodes, edges, by_type, by_status breakdown
-```
-
-When the executor loop runs, each Ollama call's `eval_count` is added to `tokens_used`. The budget check runs before every tool call — when exceeded, the executor is forced to submit a partial result with the `budget_exhausted` flag set.
-
-This is real token tracking, not estimates. Every mandate knows exactly how many tokens it burned and how many turns it took.
-
-## Tests (74 passing)
-
-```
-tests/test_mandate.py     17 tests — Budget FSM, path globs, status transitions, schema
-tests/test_scope.py       10 tests — Tool enforcement, path blocking, graph recording, wrap_tool
-tests/test_graph.py       14 tests — Node/edge CRUD, ancestry, subtree BFS, FTS, stats
-tests/test_sandbox.py      7 tests — Worktree creation, isolation, diff, merge, cleanup
-tests/test_validator.py    10 tests — Scope checks, schema, side effects, overlap detection
-tests/test_e2e.py          3 tests — Full cycle, violation E2E, overlap detection
-```
-
-## 2026 Prior Art
-
-| System | Has | Missing |
-|--------|-----|---------|
-| OpenAI Codex sandbox | Path sandboxing (WritableRoot) | Mandate contracts, graph persistence |
-| ccswarm | Git worktree isolation | Scope enforcement, validation |
-| ALIGN | Game-theoretic mandates | Structural enforcement, git integration |
-| AgentNet | DAG messaging | Code scope, git sandbox |
-| EvoGit | Branch proposals + review | Mandate authority, depth limits |
-| Code as Agent Harness | Role-based hierarchy concept | No implementation |
-| **Puppet Master** | **All of the above** | Nothing — combines all five + GAT graph layer |
-
-The novel addition: **queryable graph as the authority layer**. Same as GAT eliminated API hallucination — Puppet Master eliminates authority hallucination.
+- Ollama running with `qwen3.5:4b` or `qwen3.5:8b` pulled
+- Git (for worktree isolation)
