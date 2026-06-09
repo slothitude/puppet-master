@@ -141,3 +141,40 @@ def detect_overlaps(mandates: list[CodeMandate]) -> list[dict]:
                     "overlapping_paths": overlap,
                 })
     return conflicts
+
+
+def _paths_overlap(p1: str, p2: str) -> bool:
+    """Check if two glob patterns could match the same file."""
+    # Exact match
+    if p1 == p2:
+        return True
+    # Strip ** and /* — compare directory prefixes
+    dir1 = p1.replace("/**", "").replace("/*", "")
+    dir2 = p2.replace("/**", "").replace("/*", "")
+    if dir1.startswith(dir2) or dir2.startswith(dir1):
+        return True
+    return False
+
+
+def detect_overlaps_enriched(mandates: list[CodeMandate]) -> list:
+    """Glob-aware overlap detection returning OverlapConflict objects."""
+    from partitioner import OverlapConflict
+
+    conflicts = []
+    for i, m1 in enumerate(mandates):
+        for m2 in mandates[i + 1:]:
+            overlapping = []
+            for p1 in m1.allowed_paths:
+                for p2 in m2.allowed_paths:
+                    if _paths_overlap(p1, p2):
+                        overlapping.append((p1, p2))
+            if overlapping:
+                flat = list({p for pair in overlapping for p in pair})
+                conflicts.append(OverlapConflict(
+                    mandate_1_id=m1.mandate_id,
+                    mandate_2_id=m2.mandate_id,
+                    mandate_1_paths=list(m1.allowed_paths),
+                    mandate_2_paths=list(m2.allowed_paths),
+                    overlapping_paths=flat,
+                ))
+    return conflicts

@@ -15,35 +15,9 @@ import sys
 from config import DB_PATH, load_puppets
 from graph import MandateGraph
 from mandate import CodeMandate, _now, _id
-from validator import detect_overlaps
+from partitioner import OverlapType, partition_work
 
 logger = logging.getLogger(__name__)
-
-
-def resolve_overlaps(conflicts: list[dict], strategy: str = "sequence") -> list[dict]:
-    """Resolve file overlaps between mandates.
-
-    Strategies:
-    - sequence: add depends_on edges (first completes before second)
-    - merge: combine into one mandate
-    """
-    resolutions = []
-    for c in conflicts:
-        if strategy == "sequence":
-            resolutions.append({
-                "type": "sequence",
-                "mandate_1": c["mandate_1"],
-                "mandate_2": c["mandate_2"],
-                "note": f"{c['mandate_2']} will wait for {c['mandate_1']} to merge",
-            })
-        elif strategy == "merge":
-            resolutions.append({
-                "type": "merge",
-                "mandate_1": c["mandate_1"],
-                "mandate_2": c["mandate_2"],
-                "note": f"Overlap on {c['overlapping_paths']} — merge recommended",
-            })
-    return resolutions
 
 
 def analyze_goal(goal: str, repo_path: str) -> list[dict]:
@@ -105,26 +79,29 @@ def run_standalone(goal: str, repo_path: str, executor: str = "lappy-4b") -> dic
         )
         mandates.append(m)
 
-    # 2. Check overlaps
-    conflicts = detect_overlaps(mandates)
-    if conflicts:
-        resolutions = resolve_overlaps(conflicts, "sequence")
-        logger.warning(f"Found {len(conflicts)} overlaps: {json.dumps(resolutions, indent=2)}")
+    # 2. Run partition_work — classify overlaps, resolve
+    plan = partition_work(mandates, repo_path)
 
     # 3. Write to graph
     root_id = "standalone-root"
     graph.add_node(root_id, "mandate", {"goal": goal, "status": "active"})
 
-    for m in mandates:
+    for m in plan["active_mandates"]:
         graph.add_node(m.mandate_id, "mandate", m.to_dict())
         graph.add_edge(root_id, m.mandate_id, "delegates_to")
+
+    # Wire depends_on edges from SEQUENCE/EXTRACT resolutions
+    for edge in plan.get("depends_on_edges", []):
+        graph.add_edge(edge["from"], edge["to"], "depends_on")
 
     return {
         "goal": goal,
         "repo": repo_path,
-        "mandates_created": len(mandates),
-        "overlaps_detected": len(conflicts),
-        "mandate_ids": [m.mandate_id for m in mandates],
+        "mandates_created": len(plan["active_mandates"]),
+        "overlaps_detected": len(plan["resolutions"]),
+        "absorbed": plan["absorbed"],
+        "resolutions": plan["resolutions"],
+        "mandate_ids": [m.mandate_id for m in plan["active_mandates"]],
     }
 
 
