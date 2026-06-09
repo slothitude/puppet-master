@@ -22,12 +22,14 @@ class TestBudget(unittest.TestCase):
 
     def test_exhausted_tokens(self):
         b = Budget(max_turns=10, max_tokens=100)
-        b.record_turn(tokens=101)
+        b.record_turn()
+        b.record_tokens(101)
         self.assertFalse(b.can_proceed())
 
     def test_round_trip(self):
         b = Budget(max_turns=15, max_tokens=30000)
-        b.record_turn(tokens=100)
+        b.record_turn()
+        b.record_tokens(100)
         d = b.to_dict()
         b2 = Budget.from_dict(d)
         self.assertEqual(b2.turns_used, 1)

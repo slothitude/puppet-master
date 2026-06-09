@@ -45,8 +45,10 @@ class Budget:
     def can_proceed(self) -> bool:
         return self.turns_used < self.max_turns and self.tokens_used < self.max_tokens
 
-    def record_turn(self, tokens: int = 0) -> None:
+    def record_turn(self) -> None:
         self.turns_used += 1
+
+    def record_tokens(self, tokens: int) -> None:
         self.tokens_used += tokens
 
     def to_dict(self) -> dict:

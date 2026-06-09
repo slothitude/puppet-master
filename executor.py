@@ -95,6 +95,20 @@ EXECUTOR_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "think",
+            "description": "Think out loud before taking action. Use this to plan your approach or analyze observations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thought": {"type": "string", "description": "Your reasoning or plan"},
+                },
+                "required": ["thought"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "submit_result",
             "description": "Submit your work as the final result. Call this when done.",
             "parameters": {
@@ -148,6 +162,7 @@ class Executor:
         self.enforcer = ScopeEnforcer(mandate, graph=graph, executor_id=puppet.name)
         self.result: dict | None = None
         self.violations: list[dict] = []
+        self._no_tool_count: int = 0
 
     def run(self) -> dict:
         """Execute the mandate. Returns the result dict."""
@@ -165,18 +180,27 @@ class Executor:
                 logger.error(f"Ollama call failed: {e}")
                 return self._partial_result(f"Ollama error: {e}")
 
+            # Track token usage from Ollama response
+            eval_count = response.get("eval_count", 0)
+            prompt_count = response.get("prompt_eval_count", 0)
+            self.mandate.budget.record_tokens(prompt_count + eval_count)
+
             msg = response.get("message", {})
             content = msg.get("content", "")
             tool_calls = msg.get("tool_calls", [])
 
-            if content:
-                messages.append({"role": "assistant", "content": content})
-
             if not tool_calls:
-                # No tool calls = model is done
-                messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
+                self._no_tool_count += 1
+                messages.append({"role": "assistant", "content": content})
+                if self._no_tool_count >= 2:
+                    return self._partial_result(f"No tool calls. Last content: {content[:500]}")
+                messages.append({
+                    "role": "user",
+                    "content": "You must call submit_result with your final answer. If you're done, call submit_result now.",
+                })
                 continue
 
+            self._no_tool_count = 0
             messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
 
             for tc in tool_calls:
@@ -184,8 +208,10 @@ class Executor:
                 tool_name = fn.get("name", "")
                 try:
                     args = json.loads(fn.get("arguments", "{}"))
-                except json.JSONDecodeError:
-                    args = {}
+                except json.JSONDecodeError as e:
+                    tool_name_safe = fn.get("name", "unknown")
+                    messages.append({"role": "tool", "content": f"Error: malformed arguments for {tool_name_safe}. {e}"})
+                    continue
 
                 if tool_name == "submit_result":
                     self.result = args
@@ -235,6 +261,9 @@ class Executor:
     def _execute_tool(self, tool_name: str, args: dict) -> str:
         """Execute a scoped tool call."""
         path = args.get("path", "")
+
+        if tool_name == "think":
+            return f"Thought noted: {args.get('thought', '')}"
 
         if tool_name == "read_file":
             full_path = os.path.join(self.worktree_path, path)
